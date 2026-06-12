@@ -155,6 +155,7 @@ QDltFilterList& QDltFilterList::operator= (QDltFilterList const& _filterList)
 {
     QDltFilter *filter_source,*filter_copy;
     clearFilter();
+    lastLoadError = _filterList.lastLoadError;
     for(int numfilter=0;numfilter<_filterList.filters.size();numfilter++)
     {
         filter_copy = new QDltFilter();
@@ -231,20 +232,6 @@ QString QDltFilterList::checkMarker(const QDltMsg &msg)
 }
 
 #endif
-
-const QDltFilter* QDltFilterList::matchMarkerFilter(const QDltMsg &msg) const
-{
-    for(int numfilter=0;numfilter<mfilters.size();numfilter++)
-    {
-        QDltFilter *filter = mfilters[numfilter];
-        if(filter->match(msg))
-        {
-            return filter;
-        }
-    }
-
-    return nullptr;
-}
 
 bool QDltFilterList::applyRegExString(QDltMsg &msg,QString &text)
 {
@@ -464,22 +451,19 @@ QByteArray QDltFilterList::createMD5()
 }
 
 bool QDltFilterList::LoadFilter(QString _filename, bool replace){
-    bool retVal = true;
-
     QFile file(_filename);
+
+    lastLoadError.clear();
 
     if (!file.open(QFile::ReadOnly | QFile::Text))
     {
+        lastLoadError = file.errorString();
 
         return false;
     }
 
-    filename = _filename; // filename is a private member
-
     QDltFilter filter;
-
-    if(replace)
-        filters.clear();
+    QList<QDltFilter*> loadedFilters;
 
     QXmlStreamReader xml(&file);
     while (!xml.atEnd()) {
@@ -500,23 +484,45 @@ bool QDltFilterList::LoadFilter(QString _filename, bool replace){
               {
                     QDltFilter *filter_new = new QDltFilter();
                     *filter_new = filter;
-                    filters.append(filter_new);
+                    loadedFilters.append(filter_new);
               }
 
           }
     }
     if (xml.hasError())
     {
-     qDebug() << "Error in processing filter file" << filename << xml.errorString();
-     retVal = false;
+         lastLoadError = QString("%1 (line %2, column %3)")
+             .arg(xml.errorString())
+             .arg(xml.lineNumber())
+             .arg(xml.columnNumber());
+
+     qDebug() << "Error in processing filter file" << _filename << xml.errorString();
+
+     for (int numfilter = 0; numfilter < loadedFilters.size(); ++numfilter)
+     {
+         delete loadedFilters[numfilter];
+     }
+
+     file.close();
+     return false;
     }
 
     file.close();
 
+    if(replace)
+        clearFilter();
+
+    for (int numfilter = 0; numfilter < loadedFilters.size(); ++numfilter)
+    {
+        filters.append(loadedFilters[numfilter]);
+    }
+
+    filename = _filename; // filename is a private member
+
     /* update sorted filter list immediately after loading new filter */
     updateSortedFilter();
 
-    return retVal;
+    return true;
 }
 
 void QDltFilterList::updateSortedFilter()

@@ -36,7 +36,7 @@ public:
     }
 
     void setTimeRange(QDateTime start, QDateTime end) {
-        m_timeRangeMs = {start.toMSecsSinceEpoch(), end.toMSecsSinceEpoch()};
+        m_timeRange = {start.toMSecsSinceEpoch(), end.toMSecsSinceEpoch()};
     }
 
     void setHeaderSearchEnabled(bool enabled) {
@@ -56,7 +56,7 @@ private:
     bool matchAppId(const QString& appId) const;
     bool matchCtxId(const QString& ctxId) const;
     bool matchTimestampRange(unsigned int ts) const;
-    bool matchTimeRangeMs(qint64 msSinceEpoch) const;
+    bool matchTimeRange(qint64 timestampMSecsSinceEpoch) const;
 private:
     QString m_ctxId;
     QString m_appId;
@@ -67,11 +67,11 @@ private:
     };
     std::optional<TimestampRange> m_timestampRange;
 
-    struct TimeRangeMs {
-        qint64 startMsSinceEpoch;
-        qint64 endMsSinceEpoch;
+    struct TimeRange {
+        qint64 startMSecsSinceEpoch;
+        qint64 endMSecsSinceEpoch;
     };
-    std::optional<TimeRangeMs> m_timeRangeMs;
+    std::optional<TimeRange> m_timeRange;
 
     Qt::CaseSensitivity m_caseSensitivity{Qt::CaseInsensitive};
 

@@ -10,8 +10,6 @@
 #include <QMutexLocker>
 #include <QDir>
 #include <QFileInfo>
-#include <vector>
-#include <limits>
 
 #include "qdltoptmanager.h"
 
@@ -94,11 +92,9 @@ DltFileIndexer::~DltFileIndexer()
 
 bool DltFileIndexer::index(int num)
 {
-    if (!dltFile)
-    {
-        qWarning() << "DltFileIndexer::index called with null dltFile";
-        return false;
-    }
+    // start performance counter
+    //QTime time(0,0,0,0);
+    // time.start();
 
     // load filter index if enabled
     if(filterCacheEnabled && loadIndexCache(dltFile->getFileName(num)))
@@ -155,7 +151,7 @@ bool DltFileIndexer::index(int num)
     qint64 lengthOffset=2;
     qint64 storageLength=0;
     errors_in_file  = 0;
-    std::vector<char> data(DLT_FILE_INDEXER_SEG_SIZE);
+    char *data = new char[DLT_FILE_INDEXER_SEG_SIZE];
 
     // Initialise progress bar
     emit(progressText(QString("CI %1/%2").arg(currentRun).arg(maxRun)));
@@ -170,7 +166,7 @@ bool DltFileIndexer::index(int num)
     do
     {
         pos = f.pos();
-        readresult = f.read(data.data(), static_cast<qint64>(data.size()));
+        readresult =f.read(data,DLT_FILE_INDEXER_SEG_SIZE);
         if (length >= 0)
         {
            length = readresult;
@@ -308,7 +304,7 @@ bool DltFileIndexer::index(int num)
                     qDebug() << "At index file:" << ( pos *100 )/file_size << "% -" << "Header detected after end of message, offset:" << (pos+number-3) - next_message_pos << "bytes";
                     f.seek(current_message_pos+4);
                     pos = current_message_pos+4;
-                    length = f.read(data.data(), static_cast<qint64>(data.size()));
+                    length = f.read(data,DLT_FILE_INDEXER_SEG_SIZE);
                     number=0;
                     next_message_pos = 0;
                 }
@@ -326,6 +322,7 @@ bool DltFileIndexer::index(int num)
             {
                 qDebug().noquote() << "Request stoping indexing received" << __LINE__ << __FILE__;
                 emit(progress((abspos)));
+                delete[] data;
                 f.close();
                 return false;
             }
@@ -364,7 +361,8 @@ bool DltFileIndexer::index(int num)
     }
     emit(progress(pos));
 
-    // buffer is RAII-managed by std::vector
+    // delete buffer
+    delete[] data;
 
     // close file
     f.close();
@@ -376,20 +374,16 @@ bool DltFileIndexer::index(int num)
 
 bool DltFileIndexer::indexFilter(QStringList filenames)
 {
-    if (!dltFile || !pluginManager)
-    {
-        qWarning() << "DltFileIndexer::indexFilter called with null dltFile or pluginManager";
-        return false;
-    }
-
-    QSharedPointer<QDltMsg> msg;
+    QDltMsg msg;
     QDltFilterList filterList;
     quint64 ix = 0;
     unsigned int iPercent = 0;
 
+    // start performance counter
+    //time.start();
+
     // get filter list
     filterList = dltFile->getFilterList();
-    resetMarkerCounts(filterList);
     // clear index filter
     indexFilterList.clear();
     indexFilterListSorted.clear();
@@ -421,7 +415,6 @@ bool DltFileIndexer::indexFilter(QStringList filenames)
     {
         // loading filter index from filter is successful
         qDebug() << "Loaded filter index cache for files" << filenames;
-        computeMarkerCountsFromIndex(filterList, indexFilterList);
         return true;
     }
 
@@ -456,6 +449,7 @@ bool DltFileIndexer::indexFilter(QStringList filenames)
                 &indexFilterListSorted,
                 pluginManager,
                 &activeViewerPlugins,
+                &activeDecoderPlugins,
                 silentMode
             );
 
@@ -474,9 +468,7 @@ bool DltFileIndexer::indexFilter(QStringList filenames)
     // Start reading messages
     for(ix=start;ix<end;ix++)
     {
-        msg = QSharedPointer<QDltMsg>::create(); // create new instance to be filled by getMsg(), otherwise shared pointer would be empty or pointing to last message
-
-        if(!dltFile->getMsg(ix, *msg))
+        if(!dltFile->getMsg(ix, msg))
             continue; // Skip broken messages
 
         /*if(true == useIndexerThread)
@@ -538,79 +530,6 @@ bool DltFileIndexer::indexFilter(QStringList filenames)
     return true;
 }
 
-QMap<QString, int> DltFileIndexer::getMarkerCounts() const
-{
-    QMutexLocker locker(&markerCountLock);
-    return markerCounts;
-}
-
-void DltFileIndexer::addMarkerCount(const QString &filterName)
-{
-    if(filterName.isEmpty())
-    {
-        return;
-    }
-
-    QMutexLocker locker(&markerCountLock);
-    markerCounts[filterName] = markerCounts.value(filterName, 0) + 1;
-}
-
-void DltFileIndexer::recomputeMarkerCounts(const QDltFilterList &filterList, const QVector<qint64> &indices)
-{
-    emit markerCountProgressMax(indices.size());
-    emit markerCountProgressValue(0);
-
-    resetMarkerCounts(filterList);
-    computeMarkerCountsFromIndex(filterList, indices);
-
-    emit markerCountProgressValue(indices.size());
-}
-
-void DltFileIndexer::resetMarkerCounts(const QDltFilterList &filterList)
-{
-    QMutexLocker locker(&markerCountLock);
-    markerCounts.clear();
-
-    for(int numfilter=0; numfilter<filterList.filters.size(); numfilter++)
-    {
-        QDltFilter *filter = filterList.filters[numfilter];
-        if(filter != nullptr && filter->isMarker() && filter->enableFilter)
-        {
-            markerCounts.insert(filter->name, 0);
-        }
-    }
-}
-
-void DltFileIndexer::computeMarkerCountsFromIndex(const QDltFilterList &filterList, const QVector<qint64> &indices)
-{
-    const int total = indices.size();
-    const int step = qMax(1, total / 200); // throttle UI updates
-
-    for(int i = 0; i < total; ++i)
-    {
-        const qint64 rawIndex = indices[i];
-        if(rawIndex < 0 || rawIndex > std::numeric_limits<int>::max())
-        {
-            continue;
-        }
-
-        QDltMsg msg;
-        if(!dltFile->getMsg(static_cast<int>(rawIndex), msg))
-        {
-            continue;
-        }
-
-        const QDltFilter *markerFilter = filterList.matchMarkerFilter(msg);
-        if(markerFilter != nullptr)
-        {
-            addMarkerCount(markerFilter->name);
-        }
-
-        if ((i % step) == 0 || i + 1 == total)
-            emit markerCountProgressValue(i + 1);
-    }
-}
-
 bool DltFileIndexer::indexDefaultFilter()
 {
     QSharedPointer<QDltMsg> msg;
@@ -645,10 +564,7 @@ bool DltFileIndexer::indexDefaultFilter()
             );
 
     if(useDefaultFilterThread)
-    {
-        defaultFilterThread.setPriority(QThread::NormalPriority);
         defaultFilterThread.start();
-    }
 
     /* run through the whole open file */
     for(int ix = 0; ix < dltFile->size(); ix++)
@@ -1075,7 +991,7 @@ bool DltFileIndexer::saveIndex(QString filename, const QVector<qint64> &index)
     // open cache file
     if(!file.open(QFile::WriteOnly))
     {
-        qWarning() << "DltFileIndexer: Failed to save index cache to" << filename << ":" << file.errorString();
+        // open file failed
         return false;
     }
 
@@ -1108,7 +1024,7 @@ bool DltFileIndexer::loadIndex(QString filename, QVector<qint64> &index)
     // open cache file
     if(!file.open(QFile::ReadOnly))
     {
-        qWarning() << "DltFileIndexer: Failed to load index cache from" << filename << ":" << file.errorString();
+        //qDebug() << "Loading index file " << filename << "failed !";
         return false;
     }
 

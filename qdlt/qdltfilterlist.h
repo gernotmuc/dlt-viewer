@@ -131,6 +131,9 @@ public:
     */
     QString getFilename() const { return filename; }
 
+    //! Return the last filter loading error, if any.
+    QString getLastLoadError() const { return lastLoadError; }
+
     //! Update the presorted list for performance improvement.
     /*!
     */
@@ -160,6 +163,9 @@ private:
 
     //! List of nfilters.
     QList<QDltFilter*> nfilters;
+
+    //! Last filter loading error text including parser context.
+    QString lastLoadError;
 
 };
 

@@ -33,6 +33,109 @@ extern "C"
 #include "dlt_common.h"
 }
 
+namespace {
+enum class FilterMatchState { Match, Reject, NeedsDecode };
+
+bool matchesMetadataOnly(const QDltFilter *filter, const QDltMsg &msg)
+{
+    const QString msgEcuid = msg.getEcuid();
+    const QString msgApid = msg.getApid();
+    const QString msgCtid = msg.getCtid();
+
+    if(filter->enableEcuid && (msgEcuid != filter->ecuid))
+    {
+        return false;
+    }
+
+    if(filter->enableRegexp_Appid)
+    {
+        if(filter->enableApid && !filter->appidRegularExpression.match(msgApid).hasMatch())
+        {
+            return false;
+        }
+    }
+    else
+    {
+        if(filter->enableApid && (msgApid != filter->apid))
+        {
+            return false;
+        }
+    }
+
+    if(filter->enableRegexp_Context)
+    {
+        if(filter->enableCtid && !filter->contextRegularExpression.match(msgCtid).hasMatch())
+        {
+            return false;
+        }
+    }
+    else
+    {
+        if(filter->enableCtid && !msgCtid.contains(filter->ctid))
+        {
+            return false;
+        }
+    }
+
+    if(filter->enableMessageId)
+    {
+        if(filter->messageIdMax == 0)
+        {
+            if(msg.getMessageId() != filter->messageIdMin)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if((msg.getMessageId() < filter->messageIdMin) ||
+               (msg.getMessageId() >= filter->messageIdMax))
+            {
+                return false;
+            }
+        }
+    }
+
+    if(filter->enableCtrlMsgs && (msg.getType() != QDltMsg::DltTypeControl))
+    {
+        return false;
+    }
+    if(filter->enableLogLevelMax && !((msg.getType() == QDltMsg::DltTypeLog) && (msg.getSubtype() <= filter->logLevelMax)))
+    {
+        return false;
+    }
+    if(filter->enableLogLevelMin && !((msg.getType() == QDltMsg::DltTypeLog) && (msg.getSubtype() >= filter->logLevelMin)))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool requiresDecodedText(const QDltFilter *filter)
+{
+    return filter->enableHeader ||
+           filter->enableRegexp_Header ||
+           filter->enablePayload ||
+           filter->enableRegexp_Payload;
+}
+
+FilterMatchState matchBeforeDecode(const QDltFilter *filter, const QDltMsg &msg)
+{
+    if(!matchesMetadataOnly(filter, msg))
+    {
+        return FilterMatchState::Reject;
+    }
+
+    if(requiresDecodedText(filter))
+    {
+        return FilterMatchState::NeedsDecode;
+    }
+
+    return FilterMatchState::Match;
+}
+}
+
 QDltFilterList::QDltFilterList()
 {
 
@@ -52,6 +155,7 @@ QDltFilterList& QDltFilterList::operator= (QDltFilterList const& _filterList)
 {
     QDltFilter *filter_source,*filter_copy;
     clearFilter();
+    lastLoadError = _filterList.lastLoadError;
     for(int numfilter=0;numfilter<_filterList.filters.size();numfilter++)
     {
         filter_copy = new QDltFilter();
@@ -128,20 +232,6 @@ QString QDltFilterList::checkMarker(const QDltMsg &msg)
 }
 
 #endif
-
-const QDltFilter* QDltFilterList::matchMarkerFilter(const QDltMsg &msg) const
-{
-    for(int numfilter=0;numfilter<mfilters.size();numfilter++)
-    {
-        QDltFilter *filter = mfilters[numfilter];
-        if(filter->match(msg))
-        {
-            return filter;
-        }
-    }
-
-    return nullptr;
-}
 
 bool QDltFilterList::applyRegExString(QDltMsg &msg,QString &text)
 {
@@ -239,6 +329,63 @@ bool QDltFilterList::checkFilter(QDltMsg &msg)
     return found;
 }
 
+QDltFilterList::PreDecodeDecision QDltFilterList::checkFilterBeforeDecode(const QDltMsg &msg) const
+{
+    const bool positiveFiltersActive = !pfilters.isEmpty();
+    bool positiveMatched = !positiveFiltersActive;
+    bool positiveNeedsDecode = false;
+
+    for(int numfilter = 0; numfilter < pfilters.size(); numfilter++)
+    {
+        switch(matchBeforeDecode(pfilters[numfilter], msg))
+        {
+        case FilterMatchState::Match:
+            positiveMatched = true;
+            break;
+        case FilterMatchState::NeedsDecode:
+            positiveNeedsDecode = true;
+            break;
+        case FilterMatchState::Reject:
+            break;
+        }
+
+        if(positiveMatched)
+        {
+            break;
+        }
+    }
+
+    bool negativeNeedsDecode = false;
+    if(positiveMatched || positiveNeedsDecode)
+    {
+        for(int numfilter = 0; numfilter < nfilters.size(); numfilter++)
+        {
+            switch(matchBeforeDecode(nfilters[numfilter], msg))
+            {
+            case FilterMatchState::Match:
+                return PreDecodeDecision::Reject;
+            case FilterMatchState::NeedsDecode:
+                negativeNeedsDecode = true;
+                break;
+            case FilterMatchState::Reject:
+                break;
+            }
+        }
+    }
+
+    if(!positiveMatched && !positiveNeedsDecode)
+    {
+        return PreDecodeDecision::Reject;
+    }
+
+    if(positiveMatched && !negativeNeedsDecode)
+    {
+        return PreDecodeDecision::Match;
+    }
+
+    return PreDecodeDecision::NeedsDecode;
+}
+
 bool QDltFilterList::SaveFilter(QString _filename)
 {
     QFile file(_filename);
@@ -304,22 +451,19 @@ QByteArray QDltFilterList::createMD5()
 }
 
 bool QDltFilterList::LoadFilter(QString _filename, bool replace){
-    bool retVal = true;
-
     QFile file(_filename);
+
+    lastLoadError.clear();
 
     if (!file.open(QFile::ReadOnly | QFile::Text))
     {
+        lastLoadError = file.errorString();
 
         return false;
     }
 
-    filename = _filename; // filename is a private member
-
     QDltFilter filter;
-
-    if(replace)
-        filters.clear();
+    QList<QDltFilter*> loadedFilters;
 
     QXmlStreamReader xml(&file);
     while (!xml.atEnd()) {
@@ -340,23 +484,45 @@ bool QDltFilterList::LoadFilter(QString _filename, bool replace){
               {
                     QDltFilter *filter_new = new QDltFilter();
                     *filter_new = filter;
-                    filters.append(filter_new);
+                    loadedFilters.append(filter_new);
               }
 
           }
     }
     if (xml.hasError())
     {
-     qDebug() << "Error in processing filter file" << filename << xml.errorString();
-     retVal = false;
+         lastLoadError = QString("%1 (line %2, column %3)")
+             .arg(xml.errorString())
+             .arg(xml.lineNumber())
+             .arg(xml.columnNumber());
+
+     qDebug() << "Error in processing filter file" << _filename << xml.errorString();
+
+     for (int numfilter = 0; numfilter < loadedFilters.size(); ++numfilter)
+     {
+         delete loadedFilters[numfilter];
+     }
+
+     file.close();
+     return false;
     }
 
     file.close();
 
+    if(replace)
+        clearFilter();
+
+    for (int numfilter = 0; numfilter < loadedFilters.size(); ++numfilter)
+    {
+        filters.append(loadedFilters[numfilter]);
+    }
+
+    filename = _filename; // filename is a private member
+
     /* update sorted filter list immediately after loading new filter */
     updateSortedFilter();
 
-    return retVal;
+    return true;
 }
 
 void QDltFilterList::updateSortedFilter()

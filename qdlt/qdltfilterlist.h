@@ -40,6 +40,8 @@ class QDLT_EXPORT QDltFilterList
 {
 public:
 
+  enum class PreDecodeDecision { Match, Reject, NeedsDecode };
+
     //! List of filters.
     QList<QDltFilter*> filters;
 
@@ -105,6 +107,10 @@ public:
     */
     bool checkFilter(QDltMsg &msg);
 
+    //! Check if message can already be accepted or rejected from raw metadata.
+    /*! Returns NeedsDecode if header or payload conditions still need the full matcher path. */
+    PreDecodeDecision checkFilterBeforeDecode(const QDltMsg &msg) const;
+
     //! Save the filter.
     /*!
     */
@@ -124,6 +130,9 @@ public:
     /*!
     */
     QString getFilename() const { return filename; }
+
+    //! Return the last filter loading error, if any.
+    QString getLastLoadError() const { return lastLoadError; }
 
     //! Update the presorted list for performance improvement.
     /*!
@@ -154,6 +163,9 @@ private:
 
     //! List of nfilters.
     QList<QDltFilter*> nfilters;
+
+    //! Last filter loading error text including parser context.
+    QString lastLoadError;
 
 };
 
